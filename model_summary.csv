@@ -1,4 +1,0 @@
-model,r2,rmse
-LSTM,0.81,12.50
-GRU,0.76,14.10
-PatchTST,0.805,12.79
