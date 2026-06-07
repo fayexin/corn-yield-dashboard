@@ -8,12 +8,23 @@ from matplotlib.colors import Normalize
 from tqdm import tqdm
 
 
-YEAR = 2025
-VARIABLE = "tmax"
+YEARS = [2021, 2022, 2023, 2024, 2025]
+VARIABLES = [
+    "tmax",
+    "tmin",
+    "tmean",
+    "gdd10",
+    "prcp",
+    "srad",
+    "vp",
+    "vpd",
+    "swe",
+    "dayl",
+]
 
 DATA_DIR = Path("data/daymet_monthly")
 GEO_DIR = Path("data/geo")
-OUTPUT_DIR = Path(f"data/daymet_frames/{VARIABLE}/{YEAR}")
+OUTPUT_DIR = Path(f"data/daymet_frames/{VARIABLES}/{YEARS}")
 
 GEO_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -260,32 +271,54 @@ def render_frame(day_df, counties, states, selected_date, vmin, vmax):
 def main():
     download_geojson_files()
 
-    df = load_year_data()
+    for year in YEARS:
+        for variable in VARIABLES:
+            global YEAR, VARIABLE, OUTPUT_DIR
 
-    available_fips = set(df["fips"].unique())
-    available_states = set(df["state"].unique())
+            YEAR = year
+            VARIABLE = variable
+            OUTPUT_DIR = Path(f"data/daymet_frames/{VARIABLE}/{YEAR}")
+            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    counties, states = load_geometries(available_fips, available_states)
+            print("=" * 80)
+            print(f"Rendering {VARIABLE} for {YEAR}")
+            print("=" * 80)
 
-    vmin = df[VARIABLE].quantile(0.01)
-    vmax = df[VARIABLE].quantile(0.99)
+            try:
+                df = load_year_data()
+            except FileNotFoundError:
+                print(f"Skipping {YEAR}: no monthly Parquet files found.")
+                continue
 
-    print(f"Using fixed color range for {VARIABLE}: {vmin:.2f} to {vmax:.2f}")
+            if VARIABLE not in df.columns:
+                print(f"Skipping {VARIABLE} for {YEAR}: variable not found.")
+                continue
 
-    date_values = sorted(df["date"].dt.date.unique())
+            available_fips = set(df["fips"].unique())
+            available_states = set(df["state"].unique())
 
-    for selected_date in tqdm(date_values):
-        day_df = df[df["date"].dt.date == selected_date].copy()
-        render_frame(
-            day_df=day_df,
-            counties=counties,
-            states=states,
-            selected_date=selected_date,
-            vmin=vmin,
-            vmax=vmax,
-        )
+            counties, states = load_geometries(available_fips, available_states)
 
-    print(f"Done. Frames saved to {OUTPUT_DIR}")
+            vmin = df[VARIABLE].quantile(0.01)
+            vmax = df[VARIABLE].quantile(0.99)
+
+            print(f"Using fixed color range for {VARIABLE}: {vmin:.2f} to {vmax:.2f}")
+
+            date_values = sorted(df["date"].dt.date.unique())
+
+            for selected_date in tqdm(date_values):
+                day_df = df[df["date"].dt.date == selected_date].copy()
+
+                render_frame(
+                    day_df=day_df,
+                    counties=counties,
+                    states=states,
+                    selected_date=selected_date,
+                    vmin=vmin,
+                    vmax=vmax,
+                )
+
+            print(f"Done. Frames saved to {OUTPUT_DIR}")
 
 
 if __name__ == "__main__":
