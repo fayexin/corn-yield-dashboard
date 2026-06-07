@@ -444,37 +444,12 @@ fig.update_layout(
 )
 
 
-map_event = st.plotly_chart(
+st.plotly_chart(
     fig,
     use_container_width=True,
-    key="daymet_county_map",
-    on_select="rerun",
-    selection_mode="points"
+    key="daymet_county_map"
 )
 
-
-st.subheader("Clicked county")
-
-selected_points = map_event.selection.points
-
-if selected_points:
-    point = selected_points[0]
-    custom = point["customdata"]
-
-    selected_fips = custom[0]
-    selected_state = custom[1]
-    selected_county = custom[2]
-    selected_county_full_name = custom[3]
-    selected_value = custom[4]
-
-    st.markdown(
-        f"""
-        **{selected_county_full_name}, {selected_state}**
-
-        FIPS: `{selected_fips}`
-
-        {VARIABLE_LABELS[selected_variable]}: **{selected_value:.2f} {unit}**
-        """
-    )
-else:
-    st.info("Click a county on the map to show its value here.")
+st.caption(
+    "Tip: hover over a county to view county name, FIPS, state, and the selected Daymet value."
+)
