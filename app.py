@@ -134,7 +134,7 @@ def list_available_files():
     return pd.DataFrame(records)
 
 
-@st.cache_data
+@st.cache_data(max_entries=3, show_spinner="Loading selected month...")
 def load_month_data(file_path):
     df = pd.read_parquet(file_path)
 
@@ -299,7 +299,7 @@ selected_variable = st.sidebar.selectbox(
 
 state_label_mode = st.sidebar.selectbox(
     "State labels",
-    ["Abbreviation", "Full name", "None"]
+    ["None", "Abbreviation", "Full name"]
 )
 
 date_options = sorted(df["date"].dt.date.unique())
@@ -407,8 +407,8 @@ if state_label_mode != "None":
 
 
 fig.update_traces(
-    marker_line_width=0.05,
-    marker_line_color="rgba(90, 90, 90, 0.25)",
+    marker_line_width=0.02,
+    marker_line_color="rgba(90, 90, 90, 0.18)",
     selector=dict(type="choropleth")
 )
 
