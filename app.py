@@ -146,6 +146,10 @@ def load_month_data(file_path):
 
     return df
 
+@st.cache_data
+def load_variable_ranges():
+    ranges = pd.read_csv("data/daymet_variable_ranges.csv")
+    return ranges.set_index("variable").to_dict(orient="index")
 
 @st.cache_data
 def load_county_geojson():
@@ -285,6 +289,7 @@ selected_file = file_index.loc[
 ].iloc[0]
 
 df = load_month_data(selected_file)
+variable_ranges = load_variable_ranges()
 
 available_variables = [
     variable for variable in VARIABLE_LABELS
@@ -352,6 +357,10 @@ fig = px.choropleth(
         selected_variable,
     ],
     color_continuous_scale=VARIABLE_COLOR_SCALES[selected_variable],
+    range_color=[
+        variable_ranges[selected_variable]["p01"],
+        variable_ranges[selected_variable]["p99"],
+    ],
     labels={
         selected_variable: f"{VARIABLE_LABELS[selected_variable]} ({unit})"
     },
