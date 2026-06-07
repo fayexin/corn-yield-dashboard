@@ -426,7 +426,7 @@ fig.update_geos(
     projection_type="albers usa",
     lonaxis_range=[-125, -66],
     lataxis_range=[24, 50],
-    projection_scale=1.18
+    projection_scale=0.92
 )
 
 fig.update_coloraxes(
