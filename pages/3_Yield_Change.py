@@ -4,13 +4,12 @@ from urllib.request import urlopen
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
 
 st.set_page_config(
-    page_title="Yield Change Visualization",
+    page_title="County-Level Yield",
     layout="wide"
 )
 
@@ -24,12 +23,11 @@ CROP_LABELS = {
 }
 
 
-# Diverging scale: loss = red, no change = white, gain = blue.
-CHANGE_COLOR_SCALE = [
-    [0.0, "#b2182b"],
-    [0.5, "#f7f7f7"],
-    [1.0, "#2166ac"],
-]
+# Sequential scale for yield magnitude: pale = low, deep green = high.
+YIELD_COLOR_SCALE = "YlGn"
+
+# Faint fill for the all-county background layer.
+BACKGROUND_FILL = "#ececec"
 
 
 STATE_NAME_TO_ABBR = {
@@ -86,35 +84,23 @@ STATE_NAME_TO_ABBR = {
 
 
 @st.cache_data
-def load_change_data():
+def load_yield_data():
     df = pd.read_csv(DATA_PATH, dtype={"fips": str})
-
     df["fips"] = df["fips"].str.zfill(5)
-    df = df.sort_values(["crop", "fips", "year"])
-
-    grouped = df.groupby(["crop", "fips"])
-    df["yield_prev"] = grouped["yield_bu_acre"].shift(1)
-    df["prev_year"] = grouped["year"].shift(1)
-
-    # Only treat as a year-over-year change when years are consecutive,
-    # so disclosure-suppressed gaps do not produce misleading jumps.
-    consecutive = df["prev_year"] == (df["year"] - 1)
-    df["change"] = df["yield_bu_acre"] - df["yield_prev"]
-    df.loc[~consecutive, "change"] = np.nan
-
     return df
 
 
 @st.cache_data
-def get_color_limit(crop):
-    df = load_change_data()
-    crop_changes = df.loc[df["crop"] == crop, "change"].dropna()
+def get_color_range(crop):
+    df = load_yield_data()
+    values = df.loc[df["crop"] == crop, "yield_bu_acre"].dropna()
 
-    # 90th percentile of absolute change keeps the typical signal readable
-    # while letting the most extreme counties saturate at the scale ends.
-    limit = float(np.nanpercentile(crop_changes.abs(), 90))
-
-    return max(5.0, round(limit / 5.0) * 5.0)
+    # Fixed 2nd-98th percentile range per crop, so the color scale stays
+    # consistent across years and the upward yield trend is visible.
+    return (
+        float(np.nanpercentile(values, 2)),
+        float(np.nanpercentile(values, 98)),
+    )
 
 
 @st.cache_data
@@ -125,6 +111,11 @@ def load_county_geojson():
         counties = json.load(response)
 
     return counties
+
+
+@st.cache_data
+def get_all_county_fips(counties_geojson):
+    return [feature["id"] for feature in counties_geojson["features"]]
 
 
 @st.cache_data
@@ -207,17 +198,17 @@ def get_state_label_points(states_geojson, available_states):
     return pd.DataFrame(label_rows)
 
 
-st.title("County-Level Year-over-Year Yield Change")
+st.title("County-Level Crop Yield")
 
 st.write(
-    "This page shows the year-over-year change in county-level corn and soybean yields "
-    "across the continental United States, based on USDA NASS survey estimates. "
-    "Select a crop and year to compare each county's yield against the previous year. "
-    "Red counties lost yield relative to the prior year; blue counties gained."
+    "This page shows county-level corn and soybean yields across the continental "
+    "United States, based on USDA NASS survey estimates. Select a crop and year to "
+    "view the spatial pattern of yield in bushels per acre. Counties that do not "
+    "report the selected crop are shown in gray for geographic context."
 )
 
 
-data = load_change_data()
+data = load_yield_data()
 
 if data.empty:
     st.error(
@@ -229,6 +220,7 @@ if data.empty:
 
 counties = load_county_geojson()
 states = load_state_geojson()
+all_county_fips = get_all_county_fips(counties)
 
 
 st.sidebar.header("Controls")
@@ -248,14 +240,12 @@ if selected_crop is None:
 
 crop_data = data[data["crop"] == selected_crop]
 
-change_years = sorted(
-    crop_data.loc[crop_data["change"].notna(), "year"].unique()
-)
+available_years = sorted(crop_data["year"].unique())
 
 selected_year = st.sidebar.select_slider(
-    "Change year (vs. previous year)",
-    options=change_years,
-    value=change_years[-1],
+    "Year",
+    options=available_years,
+    value=available_years[-1],
 )
 
 state_label_mode = st.sidebar.selectbox(
@@ -264,48 +254,67 @@ state_label_mode = st.sidebar.selectbox(
 )
 
 
-filtered = crop_data[
-    (crop_data["year"] == selected_year) & crop_data["change"].notna()
-].copy()
+filtered = crop_data[crop_data["year"] == selected_year].copy()
 
-color_limit = get_color_limit(selected_crop)
+color_low, color_high = get_color_range(selected_crop)
 crop_label = CROP_LABELS[selected_crop]
 
 
-st.subheader(
-    f"{crop_label} yield change: {selected_year - 1} to {selected_year}"
-)
+st.subheader(f"{crop_label} yield in {selected_year}")
 
 col1, col2, col3, col4 = st.columns(4)
 
 col1.metric("Counties", f"{len(filtered):,}")
-col2.metric("Median change", f"{filtered['change'].median():+.1f} bu/acre")
-col3.metric("Largest gain", f"{filtered['change'].max():+.1f} bu/acre")
-col4.metric("Largest loss", f"{filtered['change'].min():+.1f} bu/acre")
+col2.metric("Median", f"{filtered['yield_bu_acre'].median():.1f} bu/acre")
+col3.metric("Minimum", f"{filtered['yield_bu_acre'].min():.1f} bu/acre")
+col4.metric("Maximum", f"{filtered['yield_bu_acre'].max():.1f} bu/acre")
 
 
-fig = px.choropleth(
-    filtered,
-    geojson=counties,
-    locations="fips",
-    color="change",
-    scope="usa",
-    hover_name="county_name",
-    hover_data={
-        "state_alpha": True,
-        "fips": True,
-        "yield_prev": ":.1f",
-        "yield_bu_acre": ":.1f",
-        "change": ":+.1f",
-    },
-    color_continuous_scale=CHANGE_COLOR_SCALE,
-    range_color=[-color_limit, color_limit],
-    labels={
-        "change": "Change (bu/acre)",
-        "yield_prev": f"{selected_year - 1} yield",
-        "yield_bu_acre": f"{selected_year} yield",
-        "state_alpha": "State",
-    },
+fig = go.Figure()
+
+# Background layer: every county drawn faintly so the full map shows through,
+# including counties that do not grow the selected crop.
+fig.add_trace(
+    go.Choropleth(
+        geojson=counties,
+        locations=all_county_fips,
+        z=[0] * len(all_county_fips),
+        colorscale=[[0, BACKGROUND_FILL], [1, BACKGROUND_FILL]],
+        showscale=False,
+        marker_line_color="rgba(120, 120, 120, 0.35)",
+        marker_line_width=0.15,
+        hoverinfo="skip",
+    )
+)
+
+# Data layer: counties with a reported yield for the selected crop and year.
+fig.add_trace(
+    go.Choropleth(
+        geojson=counties,
+        locations=filtered["fips"],
+        z=filtered["yield_bu_acre"],
+        zmin=color_low,
+        zmax=color_high,
+        colorscale=YIELD_COLOR_SCALE,
+        marker_line_color="rgba(90, 90, 90, 0.30)",
+        marker_line_width=0.10,
+        customdata=filtered[["county_name", "state_alpha", "fips"]].to_numpy(),
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>"
+            "State: %{customdata[1]}<br>"
+            "FIPS: %{customdata[2]}<br>"
+            "Yield: %{z:.1f} bu/acre<extra></extra>"
+        ),
+        colorbar=dict(
+            title=dict(text="Yield<br>(bu/acre)", side="right"),
+            x=1.02,
+            xanchor="left",
+            y=0.50,
+            yanchor="middle",
+            len=0.80,
+            thickness=18,
+        ),
+    )
 )
 
 
@@ -357,33 +366,12 @@ if state_label_mode != "None":
         )
 
 
-fig.update_traces(
-    marker_line_width=0.02,
-    marker_line_color="rgba(90, 90, 90, 0.18)",
-    selector=dict(type="choropleth")
-)
-
 fig.update_geos(
     visible=False,
     projection_type="albers usa",
     lonaxis_range=[-125, -66],
     lataxis_range=[24, 50],
     projection_scale=0.92
-)
-
-fig.update_coloraxes(
-    colorbar=dict(
-        title=dict(
-            text="Change<br>(bu/acre)",
-            side="right"
-        ),
-        x=1.02,
-        xanchor="left",
-        y=0.50,
-        yanchor="middle",
-        len=0.80,
-        thickness=18
-    )
 )
 
 fig.update_layout(
@@ -398,11 +386,11 @@ fig.update_layout(
 st.plotly_chart(
     fig,
     use_container_width=True,
-    key="yield_change_map"
+    key="yield_map"
 )
 
 st.caption(
-    "Color scale is fixed across years for each crop, so a given shade means the same "
-    "change everywhere. Hover over a county to see both years' yields and the change. "
-    "Counties suppressed by NASS for disclosure reasons appear blank."
+    "Color scale is fixed across years for each crop, so the same shade means the same "
+    "yield in every year. Gray counties do not report the selected crop. Hover over a "
+    "colored county to see its yield."
 )
