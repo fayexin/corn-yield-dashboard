@@ -14,7 +14,7 @@ st.set_page_config(
 )
 
 
-DATA_PATH = Path("data/crop_yield_county_1980_present.csv")
+DATA_PATH = Path("data/crop_yield_county.csv")
 
 
 CROP_LABELS = {
@@ -213,7 +213,7 @@ data = load_yield_data()
 if data.empty:
     st.error(
         "No yield data was found. Please check that "
-        "data/crop_yield_county_1980_present.csv exists."
+        "data/crop_yield_county.csv exists."
     )
     st.stop()
 

@@ -25,10 +25,10 @@ import requests
 API_URL = "https://quickstats.nass.usda.gov/api/api_GET/"
 API_KEY = os.environ.get("NASS_API_KEY", "")
 
-START_YEAR = 1980
+START_YEAR = 1950
 END_YEAR = datetime.now().year
 
-OUTPUT_PATH = "data/crop_yield_county_1980_present.csv"
+OUTPUT_PATH = "data/crop_yield_county.csv"
 
 # Alaska (02) and Hawaii (15) sit outside the continental US.
 NON_CONUS_STATE_FIPS = {"02", "15"}
