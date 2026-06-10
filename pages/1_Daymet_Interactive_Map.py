@@ -145,6 +145,83 @@ def load_county_geometries():
     ]
 
 
+STATE_NAME_TO_ABBR = {
+    "Alabama": "AL", "Arizona": "AZ", "Arkansas": "AR", "California": "CA",
+    "Colorado": "CO", "Connecticut": "CT", "Delaware": "DE",
+    "District of Columbia": "DC", "Florida": "FL", "Georgia": "GA",
+    "Idaho": "ID", "Illinois": "IL", "Indiana": "IN", "Iowa": "IA",
+    "Kansas": "KS", "Kentucky": "KY", "Louisiana": "LA", "Maine": "ME",
+    "Maryland": "MD", "Massachusetts": "MA", "Michigan": "MI",
+    "Minnesota": "MN", "Mississippi": "MS", "Missouri": "MO", "Montana": "MT",
+    "Nebraska": "NE", "Nevada": "NV", "New Hampshire": "NH", "New Jersey": "NJ",
+    "New Mexico": "NM", "New York": "NY", "North Carolina": "NC",
+    "North Dakota": "ND", "Ohio": "OH", "Oklahoma": "OK", "Oregon": "OR",
+    "Pennsylvania": "PA", "Rhode Island": "RI", "South Carolina": "SC",
+    "South Dakota": "SD", "Tennessee": "TN", "Texas": "TX", "Utah": "UT",
+    "Vermont": "VT", "Virginia": "VA", "Washington": "WA",
+    "West Virginia": "WV", "Wisconsin": "WI", "Wyoming": "WY",
+}
+
+
+@st.cache_data(show_spinner="Loading state boundaries...")
+def load_state_layers():
+    url = "https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json"
+
+    with urlopen(url) as response:
+        states = json.load(response)
+
+    border_features = []
+    label_points = []
+
+    for feature in states["features"]:
+        state_name = feature["properties"]["name"]
+        abbr = STATE_NAME_TO_ABBR.get(state_name)
+
+        if abbr is None:
+            continue
+
+        geometry = feature["geometry"]
+
+        if geometry["type"] == "Polygon":
+            polygons = [geometry["coordinates"]]
+        elif geometry["type"] == "MultiPolygon":
+            polygons = geometry["coordinates"]
+        else:
+            continue
+
+        border_features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": geometry["type"],
+                    "coordinates": _round_coords(geometry["coordinates"]),
+                },
+                "properties": {},
+            }
+        )
+
+        all_lons = []
+        all_lats = []
+
+        for polygon in polygons:
+            outer_ring = polygon[0]
+            all_lons.extend(point[0] for point in outer_ring)
+            all_lats.extend(point[1] for point in outer_ring)
+
+        if all_lons:
+            label_points.append(
+                {
+                    "position": [
+                        round(sum(all_lons) / len(all_lons), 3),
+                        round(sum(all_lats) / len(all_lats), 3),
+                    ],
+                    "text": abbr,
+                }
+            )
+
+    return border_features, label_points
+
+
 @st.cache_data
 def get_color_lut(scale_name):
     samples = pc.sample_colorscale(scale_name, np.linspace(0, 1, 256))
@@ -270,6 +347,7 @@ if file_index.empty:
 
 
 geometries = load_county_geometries()
+state_borders, state_labels = load_state_layers()
 variable_ranges = load_variable_ranges()
 
 
@@ -277,20 +355,21 @@ st.sidebar.header("Controls")
 
 available_years = sorted(file_index["year"].unique())
 
-selected_year = st.sidebar.selectbox(
+selected_year = st.sidebar.select_slider(
     "Year",
-    available_years,
-    index=len(available_years) - 1,
+    options=available_years,
+    value=available_years[-1],
 )
 
 available_months = sorted(
     file_index.loc[file_index["year"] == selected_year, "month"].unique()
 )
 
-selected_month = st.sidebar.selectbox(
+selected_month = st.sidebar.select_slider(
     "Month",
-    available_months,
-    format_func=lambda month: f"{month:02d} - {month_name[month]}"
+    options=available_months,
+    value=available_months[0],
+    format_func=lambda month: month_name[month][:3],
 )
 
 selected_file = file_index.loc[
@@ -307,32 +386,7 @@ selected_variable = st.sidebar.selectbox(
     format_func=lambda variable: f"{VARIABLE_LABELS[variable]} ({variable})",
 )
 
-date_options = sorted(
-    d for d in df["date"].dt.date.unique() if d.day in (1, 15)
-)
-
-if len(date_options) == 1:
-    selected_date = date_options[0]
-    st.sidebar.write(f"Date: {selected_date}")
-else:
-    selected_date = st.sidebar.select_slider(
-        "Date",
-        options=date_options,
-        value=date_options[0]
-    )
-
-
-filtered = df[df["date"].dt.date == selected_date]
-
-values = dict(zip(filtered["fips"], filtered[selected_variable]))
-names = dict(
-    zip(filtered["fips"], filtered["namelsad"] + ", " + filtered["state"])
-)
-
-for old_fips, new_fips in FIPS_ALIASES.items():
-    if new_fips in values:
-        values[old_fips] = values[new_fips]
-        names[old_fips] = names[new_fips]
+date_options = sorted(df["date"].dt.date.unique())
 
 range_info = variable_ranges[selected_variable]
 vmin, vmax = float(range_info["p01"]), float(range_info["p99"])
@@ -342,6 +396,78 @@ label = VARIABLE_LABELS[selected_variable]
 lut = get_color_lut(VARIABLE_COLOR_SCALES[selected_variable])
 
 
+def make_deck(day_date):
+    filtered = df[df["date"].dt.date == day_date]
+
+    values = dict(zip(filtered["fips"], filtered[selected_variable]))
+    names = dict(
+        zip(filtered["fips"], filtered["namelsad"] + ", " + filtered["state"])
+    )
+
+    for old_fips, new_fips in FIPS_ALIASES.items():
+        if new_fips in values:
+            values[old_fips] = values[new_fips]
+            names[old_fips] = names[new_fips]
+
+    features = build_features(geometries, values, names, lut, vmin, vmax, unit)
+
+    county_layer = pdk.Layer(
+        "GeoJsonLayer",
+        data={"type": "FeatureCollection", "features": features},
+        get_fill_color="properties.fill",
+        get_line_color=[90, 90, 90, 60],
+        line_width_min_pixels=0.4,
+        pickable=True,
+        stroked=True,
+        filled=True,
+    )
+
+    border_layer = pdk.Layer(
+        "GeoJsonLayer",
+        data={"type": "FeatureCollection", "features": state_borders},
+        get_line_color=[40, 40, 40, 190],
+        line_width_min_pixels=1.2,
+        stroked=True,
+        filled=False,
+        pickable=False,
+    )
+
+    label_layer = pdk.Layer(
+        "TextLayer",
+        data=state_labels,
+        get_position="position",
+        get_text="text",
+        get_size=14,
+        get_color=[70, 70, 70, 200],
+        get_text_anchor='"middle"',
+        get_alignment_baseline='"center"',
+        pickable=False,
+    )
+
+    return pdk.Deck(
+        layers=[county_layer, border_layer, label_layer],
+        initial_view_state=pdk.ViewState(
+            latitude=38.5,
+            longitude=-96.5,
+            zoom=3.4,
+            min_zoom=3,
+            max_zoom=9,
+        ),
+        map_style="light",
+        tooltip={"html": "<b>{name}</b><br/>{value}"},
+    )
+
+
+selected_date = st.sidebar.select_slider(
+    "Date",
+    options=date_options,
+    value=date_options[0],
+    format_func=lambda d: d.strftime("%b %d"),
+)
+
+
+filtered = df[df["date"].dt.date == selected_date]
+
 st.subheader(f"{label} on {selected_date}")
 
 col1, col2, col3, col4 = st.columns(4)
@@ -350,37 +476,10 @@ col2.metric("Mean", f"{filtered[selected_variable].mean():.2f} {unit}")
 col3.metric("Minimum", f"{filtered[selected_variable].min():.2f} {unit}")
 col4.metric("Maximum", f"{filtered[selected_variable].max():.2f} {unit}")
 
-
-features = build_features(geometries, values, names, lut, vmin, vmax, unit)
-
-layer = pdk.Layer(
-    "GeoJsonLayer",
-    data={"type": "FeatureCollection", "features": features},
-    get_fill_color="properties.fill",
-    get_line_color=[90, 90, 90, 60],
-    line_width_min_pixels=0.4,
-    pickable=True,
-    stroked=True,
-    filled=True,
-)
-
-deck = pdk.Deck(
-    layers=[layer],
-    initial_view_state=pdk.ViewState(
-        latitude=38.5,
-        longitude=-96.5,
-        zoom=3.4,
-        min_zoom=3,
-        max_zoom=9,
-    ),
-    map_style="light",
-    tooltip={"html": "<b>{name}</b><br/>{value}"},
-)
-
 map_col, legend_col = st.columns([12, 1])
 
 with map_col:
-    st.pydeck_chart(deck, height=560)
+    st.pydeck_chart(make_deck(selected_date), height=560)
 
 with legend_col:
     st.markdown(
@@ -389,7 +488,8 @@ with legend_col:
     )
 
 st.caption(
-    "Values are daily, for the 1st and 15th of each month. The color scale is fixed "
-    "per variable across all dates. Gray counties have no data for the selected date. "
-    "Rendering is GPU-accelerated via deck.gl; pan and zoom are free-form."
+    "Daily county-level values; the date slider covers every day of the selected "
+    "month. The color scale is fixed per variable across all dates. Gray counties "
+    "have no data. Rendering is GPU-accelerated via deck.gl; pan and zoom are "
+    "free-form."
 )
