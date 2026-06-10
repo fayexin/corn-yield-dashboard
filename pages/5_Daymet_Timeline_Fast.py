@@ -174,7 +174,7 @@ def build_features(geometries, values, names, lut, vmin, vmax, unit):
     return features
 
 
-def nice_ticks(vmin, vmax, target_count=8):
+def nice_ticks(vmin, vmax, target_count=10):
     span = max(vmax - vmin, 1e-9)
     raw_step = span / target_count
 

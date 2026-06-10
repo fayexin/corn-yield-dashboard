@@ -3,19 +3,39 @@ from calendar import month_name
 from pathlib import Path
 from urllib.request import urlopen
 
+import numpy as np
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
+import plotly.colors as pc
+import pydeck as pdk
 import streamlit as st
+
+import pydeck.bindings.json_tools as _pdk_json
+
+# pydeck pretty-prints its spec (indent=2), which more than triples the
+# payload sent to the browser on every rerun. Serialize compactly instead.
+_pdk_json.serialize = lambda obj: json.dumps(
+    obj,
+    sort_keys=True,
+    default=_pdk_json.default_serialize,
+    separators=(",", ":"),
+)
 
 
 st.set_page_config(
-    page_title="County-Level Daymet Dashboard",
+    page_title="Daymet Interactive Map",
     layout="wide"
 )
 
 
 DATA_DIR = Path("data/daymet_monthly")
+
+BACKGROUND_RGBA = [236, 236, 236, 255]
+
+# Counties whose FIPS codes changed; the geojson uses the old code while the
+# data uses the new one. Display the new-code data on the old-code geometry.
+#   46113 Shannon County, SD -> 46102 Oglala Lakota County, SD (renamed 2015)
+#   51515 Bedford City, VA   -> 51019 Bedford County, VA (merged 2013)
+FIPS_ALIASES = {"46113": "46102", "51515": "51019"}
 
 
 VARIABLE_LABELS = {
@@ -31,7 +51,6 @@ VARIABLE_LABELS = {
     "dayl": "Day length",
 }
 
-
 VARIABLE_UNITS = {
     "tmax": "°C",
     "tmin": "°C",
@@ -45,7 +64,6 @@ VARIABLE_UNITS = {
     "dayl": "seconds",
 }
 
-
 VARIABLE_COLOR_SCALES = {
     "tmax": "YlOrRd",
     "tmin": "Blues",
@@ -57,59 +75,6 @@ VARIABLE_COLOR_SCALES = {
     "vpd": "Plasma",
     "swe": "Blues",
     "dayl": "Viridis",
-}
-
-
-STATE_NAME_TO_ABBR = {
-    "Alabama": "AL",
-    "Arizona": "AZ",
-    "Arkansas": "AR",
-    "California": "CA",
-    "Colorado": "CO",
-    "Connecticut": "CT",
-    "Delaware": "DE",
-    "District of Columbia": "DC",
-    "Florida": "FL",
-    "Georgia": "GA",
-    "Idaho": "ID",
-    "Illinois": "IL",
-    "Indiana": "IN",
-    "Iowa": "IA",
-    "Kansas": "KS",
-    "Kentucky": "KY",
-    "Louisiana": "LA",
-    "Maine": "ME",
-    "Maryland": "MD",
-    "Massachusetts": "MA",
-    "Michigan": "MI",
-    "Minnesota": "MN",
-    "Mississippi": "MS",
-    "Missouri": "MO",
-    "Montana": "MT",
-    "Nebraska": "NE",
-    "Nevada": "NV",
-    "New Hampshire": "NH",
-    "New Jersey": "NJ",
-    "New Mexico": "NM",
-    "New York": "NY",
-    "North Carolina": "NC",
-    "North Dakota": "ND",
-    "Ohio": "OH",
-    "Oklahoma": "OK",
-    "Oregon": "OR",
-    "Pennsylvania": "PA",
-    "Rhode Island": "RI",
-    "South Carolina": "SC",
-    "South Dakota": "SD",
-    "Tennessee": "TN",
-    "Texas": "TX",
-    "Utah": "UT",
-    "Vermont": "VT",
-    "Virginia": "VA",
-    "Washington": "WA",
-    "West Virginia": "WV",
-    "Wisconsin": "WI",
-    "Wyoming": "WY",
 }
 
 
@@ -146,106 +111,152 @@ def load_month_data(file_path):
 
     return df
 
+
 @st.cache_data
 def load_variable_ranges():
     ranges = pd.read_csv("data/daymet_variable_ranges.csv")
     return ranges.set_index("variable").to_dict(orient="index")
 
-@st.cache_data
-def load_county_geojson():
+
+def _round_coords(value):
+    if isinstance(value, float):
+        return round(value, 4)
+    if isinstance(value, list):
+        return [_round_coords(item) for item in value]
+    return value
+
+
+@st.cache_data(show_spinner="Loading county geometry...")
+def load_county_geometries():
     url = "https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json"
 
     with urlopen(url) as response:
-        counties = json.load(response)
+        geojson = json.load(response)
 
-    return counties
+    return [
+        {
+            "fips": feature["id"],
+            "geometry": {
+                "type": feature["geometry"]["type"],
+                "coordinates": _round_coords(feature["geometry"]["coordinates"]),
+            },
+        }
+        for feature in geojson["features"]
+    ]
 
 
 @st.cache_data
-def load_state_geojson():
-    url = "https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json"
+def get_color_lut(scale_name):
+    samples = pc.sample_colorscale(scale_name, np.linspace(0, 1, 256))
 
-    with urlopen(url) as response:
-        states = json.load(response)
-
-    return states
-
-
-def extract_state_boundary_lines(states_geojson, available_states):
-    border_lons = []
-    border_lats = []
-
-    for feature in states_geojson["features"]:
-        state_name = feature["properties"]["name"]
-        state_abbr = STATE_NAME_TO_ABBR.get(state_name)
-
-        if state_abbr not in available_states:
-            continue
-
-        geometry = feature["geometry"]
-
-        if geometry["type"] == "Polygon":
-            polygons = [geometry["coordinates"]]
-        elif geometry["type"] == "MultiPolygon":
-            polygons = geometry["coordinates"]
-        else:
-            continue
-
-        for polygon in polygons:
-            outer_ring = polygon[0]
-            border_lons.extend([point[0] for point in outer_ring])
-            border_lats.extend([point[1] for point in outer_ring])
-            border_lons.append(None)
-            border_lats.append(None)
-
-    return border_lons, border_lats
-
-
-def get_state_label_points(states_geojson, available_states):
-    label_rows = []
-
-    for feature in states_geojson["features"]:
-        state_name = feature["properties"]["name"]
-        state_abbr = STATE_NAME_TO_ABBR.get(state_name)
-
-        if state_abbr not in available_states:
-            continue
-
-        geometry = feature["geometry"]
-
-        if geometry["type"] == "Polygon":
-            polygons = [geometry["coordinates"]]
-        elif geometry["type"] == "MultiPolygon":
-            polygons = geometry["coordinates"]
-        else:
-            continue
-
-        all_lons = []
-        all_lats = []
-
-        for polygon in polygons:
-            outer_ring = polygon[0]
-            all_lons.extend([point[0] for point in outer_ring])
-            all_lats.extend([point[1] for point in outer_ring])
-
-        if all_lons and all_lats:
-            label_rows.append(
-                {
-                    "state": state_abbr,
-                    "state_name": state_name,
-                    "lon": sum(all_lons) / len(all_lons),
-                    "lat": sum(all_lats) / len(all_lats),
-                }
+    lut = []
+    for color in samples:
+        if color.startswith("#"):
+            lut.append(
+                [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
             )
+        else:
+            nums = color[color.index("(") + 1 : color.index(")")].split(",")
+            lut.append([int(round(float(n))) for n in nums[:3]])
 
-    return pd.DataFrame(label_rows)
+    return lut
 
 
-st.title("County-Level Daymet Daily Visualization")
+def build_features(geometries, values, names, lut, vmin, vmax, unit):
+    span = max(vmax - vmin, 1e-9)
+    features = []
+
+    for county in geometries:
+        fips = county["fips"]
+        value = values.get(fips)
+
+        if value is None or pd.isna(value):
+            fill = BACKGROUND_RGBA
+            value_text = "No data"
+        else:
+            index = int(np.clip((value - vmin) / span, 0.0, 1.0) * 255)
+            fill = lut[index] + [255]
+            value_text = f"{value:.2f} {unit}"
+
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": county["geometry"],
+                "properties": {
+                    "name": names.get(fips, f"County {fips}"),
+                    "value": value_text,
+                    "fill": fill,
+                },
+            }
+        )
+
+    return features
+
+
+def nice_ticks(vmin, vmax, target_count=10):
+    span = max(vmax - vmin, 1e-9)
+    raw_step = span / target_count
+
+    magnitude = 10 ** np.floor(np.log10(raw_step))
+    for multiple in (1, 2, 2.5, 5, 10):
+        step = multiple * magnitude
+        if step >= raw_step:
+            break
+
+    first = np.ceil(vmin / step) * step
+    ticks = [
+        0.0 if abs(tick) < step * 1e-6 else float(tick)
+        for tick in np.arange(first, vmax + step * 1e-6, step)
+    ]
+
+    decimals = 0 if step >= 1 else 1
+    return ticks, decimals
+
+
+def legend_html(lut, vmin, vmax, label, unit):
+    bar_height = 480
+    span = max(vmax - vmin, 1e-9)
+
+    stops = ", ".join(
+        f"rgb({c[0]},{c[1]},{c[2]})" for c in lut[:: max(len(lut) // 24, 1)]
+    )
+
+    ticks, decimals = nice_ticks(vmin, vmax)
+
+    tick_items = []
+    for tick in ticks:
+        bottom = (tick - vmin) / span * bar_height
+        text = f"{tick:.{decimals}f}"
+        tick_items.append(
+            f'<div style="position:absolute; bottom:{bottom - 8:.0f}px; left:0;">'
+            f'<span style="display:inline-block; width:8px; height:1px;'
+            f' background:#888; vertical-align:middle;"></span>'
+            f'<span style="font-size:12px; color:#444; margin-left:3px;'
+            f' vertical-align:middle;">{text}</span></div>'
+        )
+
+    return f"""
+    <div style="display:flex; align-items:center; height:{bar_height + 40}px;">
+      <div style="
+          width:18px; height:{bar_height}px; border:1px solid #bbb; border-radius:3px;
+          background:linear-gradient(to top, {stops});"></div>
+      <div style="position:relative; height:{bar_height}px; width:60px;
+                  margin-left:2px;">
+        {''.join(tick_items)}
+      </div>
+    </div>
+    <div style="font-size:12px; color:#444; margin-top:4px; max-width:90px;">
+      {label} ({unit})
+    </div>
+    """
+
+
+st.title("Daily Daymet Interactive Map")
 
 st.write(
-    "This dashboard visualizes county-level daily Daymet variables across the continental United States. "
-    "Select a year, month, date, and variable to view daily spatial patterns."
+    "This page visualizes county-level daily Daymet variables across the continental "
+    "United States. Select a year, month, date, and variable to view daily spatial "
+    "patterns. Pan and zoom the map freely, and hover over a county to read its value."
 )
 
 
@@ -258,8 +269,8 @@ if file_index.empty:
     st.stop()
 
 
-counties = load_county_geojson()
-states = load_state_geojson()
+geometries = load_county_geometries()
+variable_ranges = load_variable_ranges()
 
 
 st.sidebar.header("Controls")
@@ -269,7 +280,7 @@ available_years = sorted(file_index["year"].unique())
 selected_year = st.sidebar.selectbox(
     "Year",
     available_years,
-    index=len(available_years) - 1
+    index=len(available_years) - 1,
 )
 
 available_months = sorted(
@@ -285,29 +296,20 @@ selected_month = st.sidebar.selectbox(
 selected_file = file_index.loc[
     (file_index["year"] == selected_year)
     & (file_index["month"] == selected_month),
-    "file"
+    "file",
 ].iloc[0]
 
 df = load_month_data(selected_file)
-variable_ranges = load_variable_ranges()
-
-available_variables = [
-    variable for variable in VARIABLE_LABELS
-    if variable in df.columns
-]
 
 selected_variable = st.sidebar.selectbox(
     "Daymet variable",
-    available_variables,
-    format_func=lambda variable: f"{VARIABLE_LABELS[variable]} ({variable})"
+    list(VARIABLE_LABELS),
+    format_func=lambda variable: f"{VARIABLE_LABELS[variable]} ({variable})",
 )
 
-state_label_mode = st.sidebar.selectbox(
-    "State labels",
-    ["None", "Abbreviation", "Full name"]
+date_options = sorted(
+    d for d in df["date"].dt.date.unique() if d.day in (1, 15)
 )
-
-date_options = sorted(df["date"].dt.date.unique())
 
 if len(date_options) == 1:
     selected_date = date_options[0]
@@ -320,145 +322,74 @@ else:
     )
 
 
-filtered = df[df["date"].dt.date == selected_date].copy()
+filtered = df[df["date"].dt.date == selected_date]
 
-unit = VARIABLE_UNITS[selected_variable]
-
-
-st.subheader(
-    f"{VARIABLE_LABELS[selected_variable]} on {selected_date}"
+values = dict(zip(filtered["fips"], filtered[selected_variable]))
+names = dict(
+    zip(filtered["fips"], filtered["namelsad"] + ", " + filtered["state"])
 )
 
-col1, col2, col3, col4 = st.columns(4)
+for old_fips, new_fips in FIPS_ALIASES.items():
+    if new_fips in values:
+        values[old_fips] = values[new_fips]
+        names[old_fips] = names[new_fips]
 
+range_info = variable_ranges[selected_variable]
+vmin, vmax = float(range_info["p01"]), float(range_info["p99"])
+
+unit = VARIABLE_UNITS[selected_variable]
+label = VARIABLE_LABELS[selected_variable]
+lut = get_color_lut(VARIABLE_COLOR_SCALES[selected_variable])
+
+
+st.subheader(f"{label} on {selected_date}")
+
+col1, col2, col3, col4 = st.columns(4)
 col1.metric("Counties", f"{len(filtered):,}")
 col2.metric("Mean", f"{filtered[selected_variable].mean():.2f} {unit}")
 col3.metric("Minimum", f"{filtered[selected_variable].min():.2f} {unit}")
 col4.metric("Maximum", f"{filtered[selected_variable].max():.2f} {unit}")
 
 
-fig = px.choropleth(
-    filtered,
-    geojson=counties,
-    locations="fips",
-    color=selected_variable,
-    scope="usa",
-    hover_name="namelsad",
-    hover_data={
-        "state": True,
-        "fips": True,
-        selected_variable: ":.2f",
-    },
-    custom_data=[
-        "fips",
-        "state",
-        "county",
-        "namelsad",
-        selected_variable,
-    ],
-    color_continuous_scale=VARIABLE_COLOR_SCALES[selected_variable],
-    range_color=[
-        variable_ranges[selected_variable]["p01"],
-        variable_ranges[selected_variable]["p99"],
-    ],
-    labels={
-        selected_variable: f"{VARIABLE_LABELS[selected_variable]} ({unit})"
-    },
+features = build_features(geometries, values, names, lut, vmin, vmax, unit)
+
+layer = pdk.Layer(
+    "GeoJsonLayer",
+    data={"type": "FeatureCollection", "features": features},
+    get_fill_color="properties.fill",
+    get_line_color=[90, 90, 90, 60],
+    line_width_min_pixels=0.4,
+    pickable=True,
+    stroked=True,
+    filled=True,
 )
 
-
-available_states = set(filtered["state"].unique())
-
-state_border_lons, state_border_lats = extract_state_boundary_lines(
-    states,
-    available_states
+deck = pdk.Deck(
+    layers=[layer],
+    initial_view_state=pdk.ViewState(
+        latitude=38.5,
+        longitude=-96.5,
+        zoom=3.4,
+        min_zoom=3,
+        max_zoom=9,
+    ),
+    map_style="light",
+    tooltip={"html": "<b>{name}</b><br/>{value}"},
 )
 
-fig.add_trace(
-    go.Scattergeo(
-        lon=state_border_lons,
-        lat=state_border_lats,
-        mode="lines",
-        line=dict(
-            width=1.2,
-            color="rgba(40, 40, 40, 0.75)"
-        ),
-        hoverinfo="skip",
-        showlegend=False
+map_col, legend_col = st.columns([12, 1])
+
+with map_col:
+    st.pydeck_chart(deck, height=560)
+
+with legend_col:
+    st.markdown(
+        legend_html(lut, vmin, vmax, label, unit),
+        unsafe_allow_html=True,
     )
-)
-
-if state_label_mode != "None":
-    state_labels = get_state_label_points(states, available_states)
-
-    if not state_labels.empty:
-        if state_label_mode == "Abbreviation":
-            label_text = state_labels["state"]
-            text_size = 12
-        else:
-            label_text = state_labels["state_name"]
-            text_size = 9
-
-        fig.add_trace(
-            go.Scattergeo(
-                lon=state_labels["lon"],
-                lat=state_labels["lat"],
-                mode="text",
-                text=label_text,
-                textfont=dict(
-                    size=text_size,
-                    color="rgba(80, 80, 80, 0.45)"
-                ),
-                hoverinfo="skip",
-                showlegend=False
-            )
-        )
-
-
-fig.update_traces(
-    marker_line_width=0.02,
-    marker_line_color="rgba(90, 90, 90, 0.18)",
-    selector=dict(type="choropleth")
-)
-
-fig.update_geos(
-    visible=False,
-    projection_type="albers usa",
-    lonaxis_range=[-125, -66],
-    lataxis_range=[24, 50],
-    projection_scale=0.92
-)
-
-fig.update_coloraxes(
-    colorbar=dict(
-        title=dict(
-            text=f"{VARIABLE_LABELS[selected_variable]}<br>({unit})",
-            side="right"
-        ),
-        x=1.02,
-        xanchor="left",
-        y=0.50,
-        yanchor="middle",
-        len=0.80,
-        thickness=18
-    )
-)
-
-fig.update_layout(
-    height=850,
-    margin={"r": 90, "t": 20, "l": 0, "b": 0},
-    geo=dict(
-        domain=dict(x=[0.00, 0.96], y=[0.00, 1.00])
-    )
-)
-
-
-st.plotly_chart(
-    fig,
-    use_container_width=True,
-    key="daymet_county_map"
-)
 
 st.caption(
-    "Tip: hover over a county to view county name, FIPS, state, and the selected Daymet value."
+    "Values are daily, for the 1st and 15th of each month. The color scale is fixed "
+    "per variable across all dates. Gray counties have no data for the selected date. "
+    "Rendering is GPU-accelerated via deck.gl; pan and zoom are free-form."
 )
