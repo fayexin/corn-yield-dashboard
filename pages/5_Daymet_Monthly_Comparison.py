@@ -22,19 +22,15 @@ _pdk_json.serialize = lambda obj: json.dumps(
 
 
 st.set_page_config(
-    page_title="Daymet Interactive Map",
+    page_title="Daymet Monthly Comparison",
     layout="wide"
 )
 
 
-DATA_DIR = Path("data/daymet_monthly")
+DATA_PATH = Path("data/daymet_monthly_means.parquet")
 
 BACKGROUND_RGBA = [236, 236, 236, 255]
 
-# Counties whose FIPS codes changed; the geojson uses the old code while the
-# data uses the new one. Display the new-code data on the old-code geometry.
-#   46113 Shannon County, SD -> 46102 Oglala Lakota County, SD (renamed 2015)
-#   51515 Bedford City, VA   -> 51019 Bedford County, VA (merged 2013)
 FIPS_ALIASES = {"46113": "46102", "51515": "51019"}
 
 
@@ -78,44 +74,39 @@ VARIABLE_COLOR_SCALES = {
 }
 
 
+STATE_NAME_TO_ABBR = {
+    "Alabama": "AL", "Arizona": "AZ", "Arkansas": "AR", "California": "CA",
+    "Colorado": "CO", "Connecticut": "CT", "Delaware": "DE",
+    "District of Columbia": "DC", "Florida": "FL", "Georgia": "GA",
+    "Idaho": "ID", "Illinois": "IL", "Indiana": "IN", "Iowa": "IA",
+    "Kansas": "KS", "Kentucky": "KY", "Louisiana": "LA", "Maine": "ME",
+    "Maryland": "MD", "Massachusetts": "MA", "Michigan": "MI",
+    "Minnesota": "MN", "Mississippi": "MS", "Missouri": "MO", "Montana": "MT",
+    "Nebraska": "NE", "Nevada": "NV", "New Hampshire": "NH", "New Jersey": "NJ",
+    "New Mexico": "NM", "New York": "NY", "North Carolina": "NC",
+    "North Dakota": "ND", "Ohio": "OH", "Oklahoma": "OK", "Oregon": "OR",
+    "Pennsylvania": "PA", "Rhode Island": "RI", "South Carolina": "SC",
+    "South Dakota": "SD", "Tennessee": "TN", "Texas": "TX", "Utah": "UT",
+    "Vermont": "VT", "Virginia": "VA", "Washington": "WA",
+    "West Virginia": "WV", "Wisconsin": "WI", "Wyoming": "WY",
+}
+
+
 @st.cache_data
-def list_available_files():
-    files = sorted(DATA_DIR.glob("daymet_*.parquet"))
-
-    records = []
-
-    for file in files:
-        parts = file.stem.split("_")
-
-        if len(parts) == 3:
-            records.append(
-                {
-                    "year": int(parts[1]),
-                    "month": int(parts[2]),
-                    "file": str(file),
-                }
-            )
-
-    return pd.DataFrame(records)
-
-
-@st.cache_data(max_entries=3, show_spinner="Loading selected month...")
-def load_month_data(file_path):
-    df = pd.read_parquet(file_path)
-
+def load_monthly_means(file_mtime):
+    df = pd.read_parquet(DATA_PATH)
     df["fips"] = df["fips"].astype(str).str.zfill(5)
-    df["date"] = pd.to_datetime(df["date"])
-
-    if "namelsad" not in df.columns:
-        df["namelsad"] = df["county"].astype(str) + " County"
-
     return df
 
 
 @st.cache_data
-def load_variable_ranges():
-    ranges = pd.read_csv("data/daymet_variable_ranges.csv")
-    return ranges.set_index("variable").to_dict(orient="index")
+def get_color_range(variable, file_mtime):
+    df = load_monthly_means(file_mtime)
+    values = df[variable].dropna()
+    return (
+        float(np.nanpercentile(values, 2)),
+        float(np.nanpercentile(values, 98)),
+    )
 
 
 def _round_coords(value):
@@ -143,24 +134,6 @@ def load_county_geometries():
         }
         for feature in geojson["features"]
     ]
-
-
-STATE_NAME_TO_ABBR = {
-    "Alabama": "AL", "Arizona": "AZ", "Arkansas": "AR", "California": "CA",
-    "Colorado": "CO", "Connecticut": "CT", "Delaware": "DE",
-    "District of Columbia": "DC", "Florida": "FL", "Georgia": "GA",
-    "Idaho": "ID", "Illinois": "IL", "Indiana": "IN", "Iowa": "IA",
-    "Kansas": "KS", "Kentucky": "KY", "Louisiana": "LA", "Maine": "ME",
-    "Maryland": "MD", "Massachusetts": "MA", "Michigan": "MI",
-    "Minnesota": "MN", "Mississippi": "MS", "Missouri": "MO", "Montana": "MT",
-    "Nebraska": "NE", "Nevada": "NV", "New Hampshire": "NH", "New Jersey": "NJ",
-    "New Mexico": "NM", "New York": "NY", "North Carolina": "NC",
-    "North Dakota": "ND", "Ohio": "OH", "Oklahoma": "OK", "Oregon": "OR",
-    "Pennsylvania": "PA", "Rhode Island": "RI", "South Carolina": "SC",
-    "South Dakota": "SD", "Tennessee": "TN", "Texas": "TX", "Utah": "UT",
-    "Vermont": "VT", "Virginia": "VA", "Washington": "WA",
-    "West Virginia": "WV", "Wisconsin": "WI", "Wyoming": "WY",
-}
 
 
 @st.cache_data(show_spinner="Loading state boundaries...")
@@ -291,7 +264,7 @@ def nice_ticks(vmin, vmax, target_count=10):
 
 
 def legend_html(lut, vmin, vmax, label, unit):
-    bar_height = 480
+    bar_height = 440
     span = max(vmax - vmin, 1e-9)
 
     stops = ", ".join(
@@ -322,63 +295,38 @@ def legend_html(lut, vmin, vmax, label, unit):
         {''.join(tick_items)}
       </div>
     </div>
-    <div style="font-size:12px; color:#444; margin-top:4px; max-width:90px;">
+    <div style="font-size:11px; color:#444; margin-top:4px; max-width:115px;
+                overflow-wrap:normal;">
       {label} ({unit})
     </div>
     """
 
 
-st.title("Daily Daymet Interactive Map")
+st.title("Daymet Monthly Comparison")
 
 st.write(
-    "This page visualizes county-level daily Daymet variables across the continental "
-    "United States. Select a year, month, date, and variable to view daily spatial "
-    "patterns. Pan and zoom the map freely, and hover over a county to read its value."
+    "Compare the same calendar month across two different years, side by side. "
+    "Both maps share a fixed color scale, so any difference you see is real — "
+    "drought years, wet springs, and decades of change are directly visible. "
+    "Hover over a county to read its monthly-mean value."
 )
 
 
-file_index = list_available_files()
-
-if file_index.empty:
+if not DATA_PATH.exists():
     st.error(
-        "No Parquet files were found. Please check that files exist in data/daymet_monthly."
+        "No monthly-mean data was found. Run build_monthly_means.py to create "
+        "data/daymet_monthly_means.parquet."
     )
     st.stop()
 
+means_mtime = DATA_PATH.stat().st_mtime
+data = load_monthly_means(means_mtime)
 
 geometries = load_county_geometries()
 state_borders, state_labels = load_state_layers()
-variable_ranges = load_variable_ranges()
 
 
 st.sidebar.header("Controls")
-
-available_years = sorted(file_index["year"].unique())
-
-selected_year = st.sidebar.select_slider(
-    "Year",
-    options=available_years,
-    value=available_years[-1],
-)
-
-available_months = sorted(
-    file_index.loc[file_index["year"] == selected_year, "month"].unique()
-)
-
-selected_month = st.sidebar.select_slider(
-    "Month",
-    options=available_months,
-    value=available_months[0],
-    format_func=lambda month: month_name[month][:3],
-)
-
-selected_file = file_index.loc[
-    (file_index["year"] == selected_year)
-    & (file_index["month"] == selected_month),
-    "file",
-].iloc[0]
-
-df = load_month_data(selected_file)
 
 selected_variable = st.sidebar.selectbox(
     "Daymet variable",
@@ -386,18 +334,38 @@ selected_variable = st.sidebar.selectbox(
     format_func=lambda variable: f"{VARIABLE_LABELS[variable]} ({variable})",
 )
 
-date_options = sorted(df["date"].dt.date.unique())
+selected_month = st.sidebar.select_slider(
+    "Month (shared by both maps)",
+    options=list(range(1, 13)),
+    value=7,
+    format_func=lambda month: month_name[month][:3],
+)
 
-range_info = variable_ranges[selected_variable]
-vmin, vmax = float(range_info["p01"]), float(range_info["p99"])
+available_years = sorted(data["year"].unique())
 
+year_left = st.sidebar.select_slider(
+    "Year (left map)",
+    options=available_years,
+    value=available_years[0],
+)
+
+year_right = st.sidebar.select_slider(
+    "Year (right map)",
+    options=available_years,
+    value=available_years[-1],
+)
+
+
+color_low, color_high = get_color_range(selected_variable, means_mtime)
 unit = VARIABLE_UNITS[selected_variable]
 label = VARIABLE_LABELS[selected_variable]
 lut = get_color_lut(VARIABLE_COLOR_SCALES[selected_variable])
 
 
-def make_deck(day_date):
-    filtered = df[df["date"].dt.date == day_date]
+def make_deck(year):
+    filtered = data[
+        (data["year"] == year) & (data["month"] == selected_month)
+    ]
 
     values = dict(zip(filtered["fips"], filtered[selected_variable]))
     names = dict(
@@ -409,7 +377,8 @@ def make_deck(day_date):
             values[old_fips] = values[new_fips]
             names[old_fips] = names[new_fips]
 
-    features = build_features(geometries, values, names, lut, vmin, vmax, unit)
+    features = build_features(geometries, values, names, lut,
+                              color_low, color_high, unit)
 
     county_layer = pdk.Layer(
         "GeoJsonLayer",
@@ -437,19 +406,21 @@ def make_deck(day_date):
         data=state_labels,
         get_position="position",
         get_text="text",
-        get_size=14,
+        get_size=12,
         get_color=[70, 70, 70, 200],
         get_text_anchor='"middle"',
         get_alignment_baseline='"center"',
         pickable=False,
     )
 
-    return pdk.Deck(
+    mean_value = filtered[selected_variable].mean()
+
+    deck = pdk.Deck(
         layers=[county_layer, border_layer, label_layer],
         initial_view_state=pdk.ViewState(
             latitude=38.5,
             longitude=-96.5,
-            zoom=3.4,
+            zoom=3.0,
             min_zoom=3,
             max_zoom=9,
         ),
@@ -457,39 +428,38 @@ def make_deck(day_date):
         tooltip={"html": "<b>{name}</b><br/>{value}"},
     )
 
-
-selected_date = st.sidebar.select_slider(
-    "Date",
-    options=date_options,
-    value=date_options[0],
-    format_func=lambda d: d.strftime("%b %d"),
-)
+    return deck, mean_value
 
 
-filtered = df[df["date"].dt.date == selected_date]
+st.subheader(f"{label} — {month_name[selected_month]}")
 
-st.subheader(f"{label} on {selected_date}")
+left_col, right_col, legend_col = st.columns([6, 6, 1])
 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Counties", f"{len(filtered):,}")
-col2.metric("Mean", f"{filtered[selected_variable].mean():.2f} {unit}")
-col3.metric("Minimum", f"{filtered[selected_variable].min():.2f} {unit}")
-col4.metric("Maximum", f"{filtered[selected_variable].max():.2f} {unit}")
+with left_col:
+    deck_left, mean_left = make_deck(year_left)
+    st.markdown(
+        f"**{month_name[selected_month]} {year_left}** — "
+        f"CONUS mean {mean_left:.2f} {unit}"
+    )
+    st.pydeck_chart(deck_left, height=520)
 
-map_col, legend_col = st.columns([12, 1])
-
-with map_col:
-    st.pydeck_chart(make_deck(selected_date), height=560)
+with right_col:
+    deck_right, mean_right = make_deck(year_right)
+    difference = mean_right - mean_left
+    st.markdown(
+        f"**{month_name[selected_month]} {year_right}** — "
+        f"CONUS mean {mean_right:.2f} {unit} ({difference:+.2f} vs left)"
+    )
+    st.pydeck_chart(deck_right, height=520)
 
 with legend_col:
     st.markdown(
-        legend_html(lut, vmin, vmax, label, unit),
+        legend_html(lut, color_low, color_high, label, unit),
         unsafe_allow_html=True,
     )
 
 st.caption(
-    "Daily county-level values; the date slider covers every day of the selected "
-    "month. The color scale is fixed per variable across all dates. Gray counties "
-    "have no data. Rendering is GPU-accelerated via deck.gl; pan and zoom are "
-    "free-form."
+    "Values are monthly means per county. Both maps use the same fixed color scale "
+    "for the selected variable, so colors are directly comparable between years. "
+    "Gray counties have no data. Rendering is GPU-accelerated via deck.gl."
 )

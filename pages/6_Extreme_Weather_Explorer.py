@@ -110,7 +110,7 @@ EVENTS = [
 
 
 @st.cache_data
-def load_monthly_means():
+def load_monthly_means(file_mtime):
     df = pd.read_parquet(
         MEANS_PATH,
         columns=["fips", "state", "namelsad", "year", "month", "tmean", "prcp"],
@@ -120,18 +120,18 @@ def load_monthly_means():
 
 
 @st.cache_data
-def load_normals():
+def load_normals(file_mtime):
     normals = pd.read_parquet(NORMALS_PATH)
     normals["fips"] = normals["fips"].astype(str).str.zfill(5)
     return normals
 
 
 @st.cache_data
-def get_anomaly_range(variable_key):
+def get_anomaly_range(variable_key, means_mtime, normals_mtime):
     config = ANOMALY_CONFIG[variable_key]
 
-    df = load_monthly_means()
-    normals = load_normals()
+    df = load_monthly_means(means_mtime)
+    normals = load_normals(normals_mtime)
 
     merged = df.merge(normals, on=["fips", "month"])
     anomaly = merged[config["column"]] - merged[config["normal"]]
@@ -263,8 +263,10 @@ if not NORMALS_PATH.exists():
     )
     st.stop()
 
-data = load_monthly_means()
-normals = load_normals()
+means_mtime = MEANS_PATH.stat().st_mtime
+normals_mtime = NORMALS_PATH.stat().st_mtime
+data = load_monthly_means(means_mtime)
+normals = load_normals(normals_mtime)
 geometries = load_county_geometries()
 
 
@@ -321,7 +323,7 @@ merged = selected.merge(
 )
 merged["anomaly"] = merged[config["column"]] - merged[config["normal"]]
 
-limit = get_anomaly_range(variable_key)
+limit = get_anomaly_range(variable_key, means_mtime, normals_mtime)
 lut = get_color_lut(config["scale_name"])
 unit = config["unit"]
 
