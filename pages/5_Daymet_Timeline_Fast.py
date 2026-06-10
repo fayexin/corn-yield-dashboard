@@ -31,6 +31,12 @@ DATA_PATH = Path("data/daymet_monthly_means.parquet")
 
 BACKGROUND_RGBA = [236, 236, 236, 255]
 
+# Counties whose FIPS codes changed; the geojson uses the old code while the
+# data uses the new one. Display the new-code data on the old-code geometry.
+#   46113 Shannon County, SD -> 46102 Oglala Lakota County, SD (renamed 2015)
+#   51515 Bedford City, VA   -> 51019 Bedford County, VA (merged 2013)
+FIPS_ALIASES = {"46113": "46102", "51515": "51019"}
+
 
 VARIABLE_LABELS = {
     "tmax": "Maximum temperature",
@@ -168,22 +174,56 @@ def build_features(geometries, values, names, lut, vmin, vmax, unit):
     return features
 
 
+def nice_ticks(vmin, vmax, target_count=8):
+    span = max(vmax - vmin, 1e-9)
+    raw_step = span / target_count
+
+    magnitude = 10 ** np.floor(np.log10(raw_step))
+    for multiple in (1, 2, 2.5, 5, 10):
+        step = multiple * magnitude
+        if step >= raw_step:
+            break
+
+    first = np.ceil(vmin / step) * step
+    ticks = [
+        0.0 if abs(tick) < step * 1e-6 else float(tick)
+        for tick in np.arange(first, vmax + step * 1e-6, step)
+    ]
+
+    decimals = 0 if step >= 1 else 1
+    return ticks, decimals
+
+
 def legend_html(lut, vmin, vmax, label, unit):
+    bar_height = 480
+    span = max(vmax - vmin, 1e-9)
+
     stops = ", ".join(
         f"rgb({c[0]},{c[1]},{c[2]})" for c in lut[:: max(len(lut) // 24, 1)]
     )
-    mid = (vmin + vmax) / 2
+
+    ticks, decimals = nice_ticks(vmin, vmax)
+
+    tick_items = []
+    for tick in ticks:
+        bottom = (tick - vmin) / span * bar_height
+        text = f"{tick:.{decimals}f}"
+        tick_items.append(
+            f'<div style="position:absolute; bottom:{bottom - 8:.0f}px; left:0;">'
+            f'<span style="display:inline-block; width:8px; height:1px;'
+            f' background:#888; vertical-align:middle;"></span>'
+            f'<span style="font-size:12px; color:#444; margin-left:3px;'
+            f' vertical-align:middle;">{text}</span></div>'
+        )
 
     return f"""
-    <div style="display:flex; align-items:center; height:520px;">
+    <div style="display:flex; align-items:center; height:{bar_height + 40}px;">
       <div style="
-          width:18px; height:480px; border:1px solid #bbb; border-radius:3px;
+          width:18px; height:{bar_height}px; border:1px solid #bbb; border-radius:3px;
           background:linear-gradient(to top, {stops});"></div>
-      <div style="display:flex; flex-direction:column; justify-content:space-between;
-                  height:480px; margin-left:8px; font-size:12px; color:#444;">
-        <span>{vmax:.1f}</span>
-        <span>{mid:.1f}</span>
-        <span>{vmin:.1f}</span>
+      <div style="position:relative; height:{bar_height}px; width:60px;
+                  margin-left:2px;">
+        {''.join(tick_items)}
       </div>
     </div>
     <div style="font-size:12px; color:#444; margin-top:4px; max-width:90px;">
@@ -238,6 +278,11 @@ filtered = data[data["period"] == selected_period]
 
 values = dict(zip(filtered["fips"], filtered[selected_variable]))
 names = dict(zip(filtered["fips"], filtered["namelsad"] + ", " + filtered["state"]))
+
+for old_fips, new_fips in FIPS_ALIASES.items():
+    if new_fips in values:
+        values[old_fips] = values[new_fips]
+        names[old_fips] = names[new_fips]
 
 vmin, vmax = get_color_range(selected_variable)
 unit = VARIABLE_UNITS[selected_variable]
