@@ -43,6 +43,7 @@ ANOMALY_CONFIG = {
         "unit": "°C",
         "scale_name": "RdBu_r",       # blue = colder, red = warmer
         "elevation_per_unit": 45000,  # meters of column height per °C
+        "noise_floor": 0.5,           # anomalies within +/- this stay flat
     },
     "precipitation": {
         "column": "prcp",
@@ -51,6 +52,7 @@ ANOMALY_CONFIG = {
         "unit": "mm/day",
         "scale_name": "BrBG",         # brown = drier, teal = wetter
         "elevation_per_unit": 90000,
+        "noise_floor": 0.5,
     },
 }
 
@@ -236,9 +238,10 @@ def legend_html(lut, vmin, vmax, label, unit):
         {''.join(tick_items)}
       </div>
     </div>
-    <div style="font-size:12px; color:#444; margin-top:4px; max-width:100px;">
+    <div style="font-size:11px; color:#444; margin-top:4px; max-width:115px;
+                overflow-wrap:normal;">
       {label} ({unit})<br><br>
-      Column height = size of the anomaly
+      Column height = size of the anomaly; near-normal counties stay flat
     </div>
     """
 
@@ -332,9 +335,9 @@ if blurb:
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Counties", f"{len(merged):,}")
-col2.metric("Mean anomaly", f"{merged['anomaly'].mean():+.2f} {unit}")
-col3.metric("Most negative", f"{merged['anomaly'].min():+.2f} {unit}")
-col4.metric("Most positive", f"{merged['anomaly'].max():+.2f} {unit}")
+col2.metric(f"Mean anomaly ({unit})", f"{merged['anomaly'].mean():+.2f}")
+col3.metric(f"Most negative ({unit})", f"{merged['anomaly'].min():+.2f}")
+col4.metric(f"Most positive ({unit})", f"{merged['anomaly'].max():+.2f}")
 
 
 anomalies = dict(zip(merged["fips"], merged["anomaly"]))
@@ -365,7 +368,7 @@ for county in geometries:
         index = int(np.clip((anomaly + limit) / span, 0.0, 1.0) * 255)
         fill = lut[index] + [235]
         elevation = (
-            abs(float(anomaly))
+            max(abs(float(anomaly)) - config["noise_floor"], 0.0)
             * config["elevation_per_unit"]
             * exaggeration
         )
@@ -431,6 +434,7 @@ with legend_col:
 
 st.caption(
     "Anomalies are departures from each county's 1980–2010 average for the same "
-    "calendar month. Column height shows the size of the anomaly; color shows its "
+    "calendar month. Column height shows the size of the anomaly; counties within "
+    "±0.5 of normal stay flat, so only genuine departures rise. Color shows the "
     "direction. Hold Ctrl (or right-click) and drag to tilt and rotate the view."
 )
